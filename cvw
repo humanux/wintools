@@ -1,0 +1,444 @@
+#!/bin/bash
+#############################################################################
+# This script is used to create virtio-win-prewhql iso
+# before start the script you should
+# 1.config the version of the virtio-win using: -w xx -q xx
+# 2.check the default url is correct.
+# 3.check the drvier path in the Associative Arrays.
+# 4.using root to run this script
+#the iso will put in you $ROOT_PATH
+#############################################################################
+usage()
+{
+    cat << EOF
+    command [option]
+    option:
+    -p : assign the root path like "/root"
+    -n : if don't want download, add -n,default is down the package
+    -w : set virtio_win_version, like : " -w 55"
+    -q : set qxl_version like "-q 17"
+    -u : set update nfs, default is put the iso under the root path
+    -r : clear the package that download, default is not clear
+    -h : help
+    example: ./create  -d no   this will not download the package, using it when you have downloaded the package
+             ./create  -w 55
+             ./create  -w 55 -q 17
+EOF
+   exit 0
+}
+
+ARGS=`getopt -o p:nw:q:urh -- "$@"`
+[ $? -ne 0 ] && usage
+eval set -- "${ARGS}"
+while true
+do
+    case "$1" in
+        -p|--rootpath) P_PATH=$2; shift 2;;
+        -n|--download) DOWNLOAD='No'; shift;;
+        -w|--virtio_win_version) VIRTIO_WIN_VER=$2; shift 2;;
+        -q|--qxl_version) QXL_VERSION=$2; shift 2;;
+        -u|--update_nfs) UPDATE_NFS='Yes'; shift ;;
+        -r|--remove) REMOVE="Yes"; shift;;
+        -h|--help) usage ;;
+        --)shift; break ;;
+        *) usage;exit 1;;
+    esac
+done
+
+INFO_FILE=/root/.cvw-info
+URL_ROOT=http://download.devel.redhat.com/brewroot/packages
+VIRTIO_PACK_LINK=$URL_ROOT/virtio-win-prewhql/0.1/
+QXL_PACK_LINK=$URL_ROOT/qxl-win/0.1/
+
+if [ "_$VIRTIO_WIN_VER" == "_" ]
+then
+VIRTIO_WIN_VER_LAT=$(curl -s $VIRTIO_PACK_LINK | sed -n 's/.*<a href="\([0-9]\+\).*/\1/p'| sed -n '$p')
+fi
+
+if [ "_$QXL_VERSION" == "_" ]
+then
+QXL_VERSION_LAT=$(curl -s $QXL_PACK_LINK | sed -n 's/.*<a href="\([0-9]\+\).*/\1/p'| sed -n '$p')
+fi
+
+if [ "_$VIRTIO_WIN_VER" == "_"  -a  "_$QXL_VERSION" == "_" ]
+then
+    if [ "virtio:$VIRTIO_WIN_VER_LAT,qxl:$QXL_VERSION_LAT" == $(cat $INFO_FILE) ]
+    then
+        exit
+    else
+        echo "virtio:$VIRTIO_WIN_VER_LAT,qxl:$QXL_VERSION_LAT" > $INFO_FILE 
+    fi
+fi
+
+
+UPDATE_NFS=${UPDATE_NFS:-'No'}
+NEED_WGET=${DOWNLOAD:-'Yes'}
+ROOT_PATH=${P_PATH:=$PWD}
+SUB_VERSION=${VIRTIO_WIN_VER:=$VIRTIO_WIN_VER_LAT}
+QXL_VERSION=${QXL_VERSION:=$QXL_VERSION_LAT}
+MAIN_VERSION=0.1
+CLEAR_PATH=${REMOVE:="No"}
+
+URL_VIRT_WIN_ZIP=$URL_ROOT/virtio-win-prewhql/$MAIN_VERSION/$SUB_VERSION/win/virtio-win-prewhql-$MAIN_VERSION.zip
+URL_QXL_W7_X64=$URL_ROOT/qxl-win/0.1/$QXL_VERSION/win/qxl_w7_x64.zip
+URL_QXL_W7_X86=$URL_ROOT/qxl-win/0.1/$QXL_VERSION/win/qxl_w7_x86.zip
+URL_QXL_XP_X86=$URL_ROOT/qxl-win/0.1/$QXL_VERSION/win/qxl_xp_x86.zip
+
+if [ ! -e $ROOT_PATH/virt_win_iso_create ]
+echo "============create need dir ============"
+then
+    mkdir -p  $ROOT_PATH/virt_win_iso_create/{iso,source,virtio-win-vfd,vfs_source}
+fi
+
+ISO_CREATE_ROOT_PATH=$ROOT_PATH/virt_win_iso_create
+VIR_WIN_TGT_ISO_PATH=$ISO_CREATE_ROOT_PATH/iso
+VIR_WIN_TGT_VFD_PATH=$ISO_CREATE_ROOT_PATH/virtio-win-vfd
+VIR_WIN_RESOURCE_PATH=$ISO_CREATE_ROOT_PATH/source
+VIR_WIN_VFS_RESOURCE_PATH=$ISO_CREATE_ROOT_PATH/vfs_source
+
+WIN_VERSION="2k12 w8 2k3 2k8 w7 xp"
+ARCH_ALL="amd64 x86"
+
+#package need copy to vfd
+#VFD_PACKGE_NETKVM="netkvm.cat netkvm.inf netkvm.sys"
+#VFD_PACKGE_NETKVM_EXT="netkvmco.dll"
+VFD_PACKGE_VIOSTOR="viostor.cat viostor.inf viostor.sys viostor.pdb"
+VFD_PACKGE_VIOSCSI="vioscsi.inf vioscsi.sys vioscsi.cat"
+VFD_PACKGE_QXL="qxl.cat qxldd.dll qxl.inf qxl.sys"
+
+#package need copy to iso
+declare -A  PACKGE_ALL
+PACKGE_ALL=([BALLON]="balloon.cat balloon.inf balloon.pdb balloon.sys blnsvr.exe blnsvr.pdb")
+PACKGE_ALL+=([NETKVM]="netkvm.cat netkvm.inf netkvm.pdb netkvm.sys")
+PACKGE_ALL+=([NETKVM_EXT]="netkvmco.dll")
+PACKGE_ALL+=([VIOSER]="vioser.cat vioser.inf vioser.pdb vioser.sys vioser.pdb")
+PACKGE_ALL+=([VIOSTOR]="viostor.cat viostor.inf viostor.pdb viostor.sys")
+PACKGE_ALL+=([VIOSCSI]="vioscsi.inf vioscsi.pdb vioscsi.sys vioscsi.cat")
+
+#Vista  Win7  Wlh  Wnet  WXp  XP
+# config this  Associative Arrays  reference:
+# https://docspace.corp.redhat.com/docs/DOC-97715
+# [windows_version+arch]=path to the driver (unzip the virtio-win-prewhql-*.zip)
+
+declare -A BALLON_PATH  NETKVM_PATH  VIOSER_PATH VIOSCSI_PATH  VIOSTOR_PATH
+declare -A VFD_DEST_PATH  VFD_ARCH_DEST_PATH ISO_DEST_PATH
+
+BALLON_PATH=([2k3x86]=WXp      [2k8x86]=WXp     [w7x86]=WXp    [xpx86]=WXp    [w8x86]=win8   [2k12x86]=NONE)
+BALLON_PATH+=([2k3amd64]=Wnet  [2k8amd64]=Wnet  [w7amd64]=Wnet [xpamd64]=NONE [w8amd64]=win8 [2k12amd64]=win8)
+#netkvm
+NETKVM_PATH=([2k3x86]=XP       [2k8x86]=Vista   [w7x86]=win7   [xpx86]=XP     [w8x86]=win8   [2k12x86]=NONE)
+NETKVM_PATH+=([2k3amd64]=XP    [2k8amd64]=Vista  [w7amd64]=win7 [xpamd64]=NONE [w8amd64]=win8 [2k12amd64]=win8)
+#vioserial 
+VIOSER_PATH=([2k3x86]=WXp      [2k8x86]=WXp     [w7x86]=WXp    [xpx86]=WXp    [w8x86]=win8   [2k12x86]=NONE)
+VIOSER_PATH+=([2k3amd64]=Wnet  [2k8amd64]=Wnet  [w7amd64]=Wnet [xpamd64]=Wnet [w8amd64]=win8 [2k12amd64]=win8)
+#viostor
+VIOSTOR_PATH=([2k3x86]=Wnet    [2k8x86]=Wlh     [w7x86]=Wlh    [xpx86]=WXp    [w8x86]=win8   [2k12x86]=NONE)
+VIOSTOR_PATH+=([2k3amd64]=Wnet [2k8amd64]=Wlh   [w7amd64]=Wlh  [xpamd64]=NONE [w8amd64]=win8 [2k12amd64]=win8)
+#vioscsi
+VIOSCSI_PATH=([2k3x86]=Wnet    [2k8x86]=Wlh     [w7x86]=Wlh    [xpx86]=NONE   [w8x86]=win8   [2k12x86]=NONE)
+VIOSCSI_PATH+=([2k3amd64]=Wnet [2k8amd64]=Wlh   [w7amd64]=Wlh  [xpamd64]=NONE [w8amd64]=win8 [2k12amd64]=win8)
+
+
+#the driver path
+ISO_DEST_PATH=([BALLON]=Balloon [NETKVM]=NetKVM [VIOSER]=vioserial [VIOSTOR]=viostor [VIOSCSI]=vioscsi)
+VFD_DEST_PATH=([2k3]=Win2003 [2k8]=Win2008 [w7]=Win7 [xp]=WinXP [w8]=Win8 [2k12]=Win2012)
+VFD_ARCH_DEST_PATH=([amd64]=amd64 [x86]=i386)
+
+if [ $NEED_WGET == 'Yes' ]
+then
+    echo "=========== now get the file from the server your config=========="
+    rm -rf $VIR_WIN_RESOURCE_PATH/*
+    rm -rf $VIR_WIN_VFS_RESOURCE_PATH/*
+    rm -rf $VIR_WIN_TGT_ISO_PATH/*
+    rm -rf $VIR_WIN_TGT_VFD_PATH/*
+    wget $URL_VIRT_WIN_ZIP -O $VIR_WIN_RESOURCE_PATH/virt_win.zip       2>&1 >/dev/null
+    wget $URL_QXL_W7_X64   -O $VIR_WIN_VFS_RESOURCE_PATH/QXL_W7_X64.zip 2>&1 >/dev/null
+    wget $URL_QXL_W7_X86   -O $VIR_WIN_VFS_RESOURCE_PATH/QXL_W7_X86.zip 2>&1 >/dev/null
+    wget $URL_QXL_XP_X86   -O $VIR_WIN_VFS_RESOURCE_PATH/QXL_XP_X86.zip 2>&1 >/dev/null
+    
+    unzip -d $VIR_WIN_RESOURCE_PATH     $VIR_WIN_RESOURCE_PATH/virt_win.zip       2>&1 >/dev/null
+    unzip -d $VIR_WIN_VFS_RESOURCE_PATH $VIR_WIN_VFS_RESOURCE_PATH/QXL_W7_X64.zip 2>&1 >/dev/null
+    unzip -d $VIR_WIN_VFS_RESOURCE_PATH $VIR_WIN_VFS_RESOURCE_PATH/QXL_W7_X86.zip 2>&1 >/dev/null
+    unzip -d $VIR_WIN_VFS_RESOURCE_PATH $VIR_WIN_VFS_RESOURCE_PATH/QXL_XP_X86.zip 2>&1 >/dev/null
+else
+    rm -rf $VIR_WIN_TGT_ISO_PATH/*
+    rm -rf $VIR_WIN_TGT_VFD_PATH/*
+    if [ ! -d $VIR_WIN_RESOURCE_PATH ]
+    then
+        echo "You must download the source file, not using -n"
+        exit 1
+    fi
+fi
+
+mkdir -p $VIR_WIN_TGT_ISO_PATH/{Balloon,NetKVM,vioscsi,vioserial,viostor}/{2k12,2k3,2k8,w7,w8,xp}/{amd64,x86}
+mkdir -p $VIR_WIN_TGT_ISO_PATH/guest-agent
+mkdir -p $VIR_WIN_TGT_VFD_PATH/{amd64,i386}/{Win2003,Win2008,Win2012,Win7,Win8,WinXP}
+
+#cp iso file
+#echo "==============copy iso file ================"
+for module in BALLON NETKVM VIOSER VIOSTOR VIOSCSI
+    do
+    for pack_need_copy in ${PACKGE_ALL[$module]}
+    do
+        for dest_dir in $WIN_VERSION
+        do
+            for arch in $ARCH_ALL
+            do
+                #echo "++copy file $WIN_VERSION $ARCH_ALL $pack_need_copy"
+                PACK_PATH=${module}_PATH[${dest_dir}${arch}]
+                if [ ${!PACK_PATH} != "NONE" ]
+                then
+                    if [[ ! ($dest_dir == "w8" && $pack_need_copy == "vioser-test.pdb") ]]
+                    then             
+                        cp  $VIR_WIN_RESOURCE_PATH/${!PACK_PATH}/$arch/$pack_need_copy \
+                        $VIR_WIN_TGT_ISO_PATH/${ISO_DEST_PATH[$module]}/$dest_dir/$arch/ \
+                        2>&1 >/dev/null
+                    fi
+                    if [ $module == "NETKVM" ]
+                    then
+                        if  [[ ! ($dest_dir == "xp" ||  $dest_dir == "2k3") ]]
+                        then
+                            cp  $VIR_WIN_RESOURCE_PATH/${!PACK_PATH}/$arch/${PACKGE_ALL[NETKVM_EXT]}  \
+                                $VIR_WIN_TGT_ISO_PATH/${ISO_DEST_PATH[$module]}/$dest_dir/$arch/ \
+                                2>&1 >/dev/null
+                        fi
+                    fi
+
+                    if [ $module == "BALLON" -o $module == "VIOSER" ]
+                    then
+                        if  [ $dest_dir == "w8" -o  $dest_dir == "2k12" ]
+                        then
+                            export VER=01011
+                        else
+                            export VER=01009
+                        fi
+                        cp  $VIR_WIN_RESOURCE_PATH/${!PACK_PATH}/$arch/WdfCoInstaller$VER.dll \
+                            $VIR_WIN_TGT_ISO_PATH/${ISO_DEST_PATH[$module]}/$dest_dir/$arch/ \
+                            2>&1 >/dev/null
+                    fi
+                fi
+            done
+        done
+    done
+done
+
+#make vfdi
+echo "==============copy file of vfd =============="
+for arch  in $ARCH_ALL
+do
+    for dest_dir in  $WIN_VERSION
+    do
+        PACK_PATH_VIOSCSI=VIOSCSI_PATH[${dest_dir}${arch}]
+        for pack_need_copy in  $VFD_PACKGE_VIOSCSI
+        do
+            #echo "==========copy file vioscsi ==========="
+            #echo "==copy file $dest_dir $arch $pack_need_copy=="
+            if [ ${!PACK_PATH_VIOSCSI} != "NONE" ]
+            then
+                cp  $VIR_WIN_RESOURCE_PATH/${!PACK_PATH_VIOSCSI}/$arch/$pack_need_copy \
+                    $VIR_WIN_TGT_VFD_PATH/${VFD_ARCH_DEST_PATH[$arch]}/${VFD_DEST_PATH[$dest_dir]}/
+            fi
+        done
+
+        PACK_PATH_VIOSTOR=VIOSTOR_PATH[${dest_dir}${arch}]
+        for pack_need_copy in  $VFD_PACKGE_VIOSTOR
+        do
+            #echo "==========copy file viostor ==========="
+            #echo "==copy file $dest_dir $arch $pack_need_copy=="
+
+            if [ ${!PACK_PATH_VIOSTOR} != "NONE" ]
+            then
+                cp  $VIR_WIN_RESOURCE_PATH/${!PACK_PATH_VIOSTOR}/$arch/$pack_need_copy \
+                    $VIR_WIN_TGT_VFD_PATH/${VFD_ARCH_DEST_PATH[$arch]}/${VFD_DEST_PATH[$dest_dir]}/
+            fi
+        done
+        PACK_PATH_NETKVM=NETKVM_PATH[${dest_dir}${arch}]
+        if [ ${!PACK_PATH_NETKVM} != "NONE" ]
+        then
+           for pack_need_copy in  $VFD_PACKGE_NETKVM
+           do
+            #echo "==========copy file netkvm ==========="
+            #echo "==copy file $dest_dir $arch $pack_need_copy=="
+
+                if [ "$dest_dir" == "xp" ]
+                then
+                    break
+                fi
+                cp  $VIR_WIN_RESOURCE_PATH/${!PACK_PATH_NETKVM}/$arch/$pack_need_copy \
+                $VIR_WIN_TGT_VFD_PATH/${VFD_ARCH_DEST_PATH[$arch]}/${VFD_DEST_PATH[$dest_dir]}/
+           
+           done
+      
+           if [[ ! ("$dest_dir" == "2k3" ||"$dest_dir" == "xp") ]]
+           then
+                cp $VIR_WIN_RESOURCE_PATH/${!PACK_PATH_NETKVM}/$arch/$VFD_PACKGE_NETKVM_EXT \
+                $VIR_WIN_TGT_VFD_PATH/${VFD_ARCH_DEST_PATH[$arch]}/${VFD_DEST_PATH[$dest_dir]}/
+           fi
+        fi
+    done
+done
+
+#cp qxl
+for arch  in $ARCH_ALL
+do
+    for dest_dir in  w7 xp
+    do
+        for pack_need_copy in  $VFD_PACKGE_QXL
+        do
+            if [[ ($dest_dir == 'xp' && $arch == 'amd64') ]]
+            then
+                continue
+            fi
+            cp $VIR_WIN_VFS_RESOURCE_PATH/$dest_dir/$arch/$pack_need_copy \
+               $VIR_WIN_TGT_VFD_PATH/${VFD_ARCH_DEST_PATH[$arch]}/${VFD_DEST_PATH[$dest_dir]}/
+        done
+    done
+done
+
+touch $VIR_WIN_TGT_VFD_PATH/disk1
+cat > $VIR_WIN_TGT_VFD_PATH/txtsetup.oem << EOF
+[Disks]
+d1 = "OEM DISK (SCSI) WinXP/32-bit",\disk1,\i386\WinXP
+d2 = "OEM DISK (SCSI) Win2003/32-bit",\disk1,\i386\Win2003
+d3 = "OEM DISK (SCSI) Win2003/64-bit",\disk1,\amd64\Win2003
+d4 = "OEM DISK (SCSI) Win2003/32-bit",\disk1,\i386\Win2003
+d5 = "OEM DISK (SCSI) Win2003/64-bit",\disk1,\amd64\Win2003
+
+[Defaults]
+SCSI = WXP32
+
+[scsi]
+WXP32  = "Red Hat VirtIO SCSI Disk Device WinXP/32-bit"
+WNET32 = "Red Hat VirtIO BLOCK Disk Device Win2003/32-bit"
+WNET64 = "Red Hat VirtIO BLOCK Disk Device Win2003/64-bit"
+WNET32_SCSI = "Red Hat VirtIO SCSI Disk Device Win2003/32-bit"
+WNET64_SCSI = "Red Hat VirtIO SCSI Disk Device Win2003/64-bit"
+
+[Files.scsi.WXP32]
+driver = d1, viostor.sys, viostor
+inf    = d1, viostor.inf
+catalog= d1, viostor.cat
+
+[Files.scsi.WNET32]
+driver = d2, viostor.sys, viostor
+inf    = d2, viostor.inf
+catalog= d2, viostor.cat
+
+[Files.scsi.WNET32_SCSI]
+driver = d4, vioscsi.sys, vioscsi
+inf    = d4, vioscsi.inf
+catalog= d4, vioscsi.cat
+
+[Files.scsi.WNET64]
+driver = d3, viostor.sys, viostor
+inf    = d3, viostor.inf
+catalog= d3, viostor.cat
+
+[Files.scsi.WNET64_SCSI]
+driver = d5, vioscsi.sys, vioscsi
+inf    = d5, vioscsi.inf
+catalog= d5, vioscsi.cat
+
+[HardwareIds.scsi.WXP32]
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00000000", "viostor"
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00020000", "viostor"
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00021AF4", "viostor"
+
+[HardwareIds.scsi.WNET32]
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00000000", "viostor"
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00020000", "viostor"
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00021AF4", "viostor"
+
+
+[HardwareIds.scsi.WNET32_SCSI]
+id = "PCI\VEN_1AF4&DEV_1004&SUBSYS_00000000", "vioscsi"
+id = "PCI\VEN_1AF4&DEV_1004&SUBSYS_00080000", "vioscsi"
+id = "PCI\VEN_1AF4&DEV_1004&SUBSYS_00081AF4", "vioscsi"
+
+[HardwareIds.scsi.WNET64]
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00000000", "viostor"
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00020000", "viostor"
+id = "PCI\VEN_1AF4&DEV_1001&SUBSYS_00021AF4", "viostor"
+
+[HardwareIds.scsi.WNET64_SCSI]
+id = "PCI\VEN_1AF4&DEV_1004&SUBSYS_00000000", "vioscsi"
+id = "PCI\VEN_1AF4&DEV_1004&SUBSYS_00080000", "vioscsi"
+id = "PCI\VEN_1AF4&DEV_1004&SUBSYS_00081AF4", "vioscsi"
+
+[Config.WXP32]
+value = Parameters\PnpInterface,5,REG_DWORD,1
+
+[Config.WNET32]
+value = Parameters\PnpInterface,5,REG_DWORD,1
+
+[Config.WNET64]
+value = Parameters\PnpInterface,5,REG_DWORD,1
+
+[Config.WNET32_SCSI]
+value = Parameters\PnpInterface,5,REG_DWORD,1
+
+[Config.WNET64_SCSI]
+value = Parameters\PnpInterface,5,REG_DWORD,1
+
+EOF
+
+chmod 755 $VIR_WIN_TGT_VFD_PATH/disk1
+chmod 755 $VIR_WIN_TGT_VFD_PATH/txtsetup.oem
+
+if [ $UPDATE_NFS == "Yes" ]
+then
+    grep 10.66.90.128:/vol/S2/kvmauto/iso /proc/mounts
+    if [ $? == 0  ]
+    then
+        DST_PATH_BASE=$(grep 10.66.90.128:/vol/S2/kvmauto/iso /proc/mounts | awk '{print $2}')
+        DST_PATH=$DST_PATH_BASE/windows
+        NEED_UMOUNT="no"
+    else
+        [ -e /tmp/mount ] || mkdir /tmp/mount
+        mount 10.66.90.128:/vol/S2/kvmauto/iso /tmp/mount 
+        DST_PATH=/tmp/mount/windows
+        NEED_UMOUNT="Yes"
+    fi
+else
+    DST_PATH=$ROOT_PATH
+    NEED_UMOUNT="no"
+fi
+
+
+ISO_LAT_NAME=virtio-win.latest_prewhql.iso
+VFD_LAT_i386=virtio-win.latest_prewhql.vfd.i386
+VFD_LAT_amd64=virtio-win.latest_prewhql.vfd.x86_64
+#mk floappy and iso
+#ARCH_ALL="amd64 x86"
+for arch in "amd64" "i386"
+do
+  dd if=/dev/zero of=$VIR_WIN_VFS_RESOURCE_PATH/floppy.img bs=1024 count=2880
+  mkfs.msdos $VIR_WIN_VFS_RESOURCE_PATH/floppy.img 
+  mount $VIR_WIN_VFS_RESOURCE_PATH/floppy.img -o loop /mnt
+  cp $VIR_WIN_TGT_VFD_PATH/{$arch,disk1,txtsetup.oem} /mnt -R
+  sync
+  umount /mnt
+  DST_VFD_NAME="virtio-win-prewhql-$MAIN_VERSION-${SUB_VERSION}_$arch.vfd"
+  mv $VIR_WIN_VFS_RESOURCE_PATH/floppy.img $VIR_WIN_TGT_ISO_PATH/$DST_VFD_NAME
+  chmod 755 $VIR_WIN_TGT_ISO_PATH/$DST_VFD_NAME
+  cp -n $VIR_WIN_TGT_ISO_PATH/$DST_VFD_NAME  $DST_PATH/
+  VFD_LAT_NAME=VFD_LAT_$arch
+  ln -s $DST_PATH/$DST_VFD_NAME  $DST_PATH/${!VFD_LAT_NAME}
+done
+
+mkisofs -o $DST_PATH/virtio-win-prewhql-$MAIN_VERSION-$SUB_VERSION.iso \
+        -JRAVv -max-iso9660-filenames -relaxed-filenames \
+        -D --input-charset iso8859-1  $VIR_WIN_TGT_ISO_PATH
+chmod 755 $DST_PATH/virtio-win-prewhql-$MAIN_VERSION-$SUB_VERSION.iso
+ln -s  $DST_PATH/virtio-win-prewhql-$MAIN_VERSION-$SUB_VERSION.iso  $DST_PATH/$ISO_LAT_NAME
+
+if [ "_$NEED_UMOUNT" == "_Yes" ]
+then
+    umount /tmp/mount
+fi 
+
+if [ "_$CLEAR_PATH" == "_Yes" ]
+then
+     rm -rf $VIR_WIN_TGT_ISO_PATH $VIR_WIN_TGT_VFD_PATH
+     rm -rf $ROOT_PATH/virt_win_iso_create
+fi
